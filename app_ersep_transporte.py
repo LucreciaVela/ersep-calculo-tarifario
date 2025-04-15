@@ -5,84 +5,94 @@ from openpyxl import load_workbook
 import shutil
 from io import BytesIO
 
-# Configuración de la app
 st.set_page_config(page_title="ERSEP Transporte", layout="centered")
 st.title("🚌 Calculadora Tarifaria - ERSEP Transporte")
-st.markdown("Modificá los valores que necesites y luego presioná **Enter** o el botón para obtener el cálculo tarifario completo.")
+st.markdown("Ingresá los valores necesarios y presioná **Calcular Tarifa** para obtener el resultado tarifario.")
 
-# Cargar datos de referencia desde la hoja "Hoja Llave"
+# Ítems visibles definidos por el usuario
+nombres_visibles = [
+    "MT", "U", "Nc", "Nm", "Ng", "L", "Mp", "E", "Pp", "RTM",
+    "Sbcu", "Pm", "Pr", "SBcg", "Gm", "Gr", "Vc", "Vm", "Vg", "RBM", "Ut"
+]
+
 @st.cache_data
 def cargar_referencia():
     hoja = pd.read_excel("Incremento TBK_ Mesa 13 Octubre 2025.xlsx", sheet_name="Hoja Llave", header=None)
     nombres = hoja.iloc[:23, 0].tolist()
     valores_ref = hoja.iloc[:23, 14].tolist()
-    nombres = [str(n) if pd.notna(n) else f"Dato {i+1}" for i, n in enumerate(nombres)]
-    return nombres, valores_ref
+    etiquetas = {str(n): str(nombres[i]) for i, n in enumerate(nombres) if pd.notna(n)}
+    return etiquetas, valores_ref
 
-# Aplicar los nuevos valores al archivo Excel y devolverlo
-def actualizar_excel_con_datos(entradas_usuario):
-    # Crear una copia del archivo original
+def actualizar_excel_con_datos(entradas_usuario, etiquetas):
     ruta_original = "Incremento TBK_ Mesa 13 Octubre 2025.xlsx"
     ruta_temp = "ersep_calculo_actualizado.xlsx"
     shutil.copy(ruta_original, ruta_temp)
 
-    # Cargar la copia
     wb = load_workbook(ruta_temp, data_only=False)
     hoja = wb["Hoja Llave"]
 
-    # Verificar si celda está combinada
     def es_combinada(hoja, fila, columna):
         for rango in hoja.merged_cells.ranges:
             if (fila, columna) in rango.cells:
                 return True
         return False
 
-    # Cargar datos en columna B, filas 3 a 25
-    for i in range(23):
-        fila = i + 3
-        columna = 2
-        if not es_combinada(hoja, fila, columna):
-            hoja.cell(row=fila, column=columna).value = entradas_usuario[i]
+    fila_inicio = 3
+    fila_actual = fila_inicio
+    i = 0
+    while i < len(nombres_visibles) and fila_actual < 200:
+        clave = hoja.cell(row=fila_actual, column=1).value
+        if clave in nombres_visibles and not es_combinada(hoja, fila_actual, 2):
+            hoja.cell(row=fila_actual, column=2).value = entradas_usuario[i]
+            i += 1
+        fila_actual += 1
 
-    # Guardar y devolver objeto BytesIO
-    output = BytesIO()
-    wb.save(output)
-    output.seek(0)
-    return output, wb
+    salida = BytesIO()
+    wb.save(salida)
+    salida.seek(0)
+    return salida, load_workbook(salida, data_only=True)
 
-# Extraer resumen de resultados desde la hoja "Resumen de Calculo"
-def obtener_resumen(wb):
-    hoja_resumen = wb["Resumen de Calculo"]
-    resumen = {}
-    # Puedes ajustar este rango según tu estructura específica
-    for fila in hoja_resumen.iter_rows(min_row=5, max_row=40, min_col=1, max_col=3):
-        if fila[0].value and fila[2].value:
-            categoria = str(fila[0].value).strip()
-            valor = fila[2].value
-            resumen[categoria] = valor
-    return resumen
+def obtener_resumen(hoja):
+    datos = []
+    for fila in hoja.iter_rows(min_row=4, max_col=10, max_row=100):
+        c1 = fila[0].value
+        c2 = fila[1].value
+        c3 = fila[9].value if len(fila) > 9 else None
+        if c1 or c2 or c3:
+            datos.append((c1, c2, c3))
+    return datos
 
-# Cargar referencias
-nombres, valores_ref = cargar_referencia()
+etiquetas, valores_ref = cargar_referencia()
 entradas_usuario = []
 
-# Formulario para ingreso de datos
 with st.form("formulario_datos"):
-    for i in range(23):
-        entrada = st.number_input(f"{nombres[i]}", value=float(valores_ref[i]) if isinstance(valores_ref[i], (int, float)) else 0.0, step=1.0, key=f"dato_{i}")
+    st.markdown("### Ingreso de datos")
+    for clave in nombres_visibles:
+        label = etiquetas.get(clave, clave)
+        valor_ref = valores_ref[list(etiquetas.keys()).index(clave)]
+        entrada = st.number_input(f"{clave} - {label}", value=float(valor_ref) if isinstance(valor_ref, (int, float)) else 0.0, step=1.0, key=f"input_{clave}")
         entradas_usuario.append(entrada)
     calcular = st.form_submit_button("Calcular Tarifa")
 
-# Cuando se aprieta Enter o el botón
 if calcular:
-    archivo_actualizado, wb_actualizado = actualizar_excel_con_datos(entradas_usuario)
-    resumen = obtener_resumen(wb_actualizado)
+    archivo_excel, wb_final = actualizar_excel_con_datos(entradas_usuario, etiquetas)
+    hoja_resumen = wb_final["Resumen de Calculo"]
+    datos = obtener_resumen(hoja_resumen)
 
-    st.success("✅ Cálculo completado. Abajo se muestra el resumen tarifario.")
-    st.write("### 📊 Resumen por Categorías")
-    for categoria, valor in resumen.items():
-        st.write(f"**{categoria}**: {valor}")
+    st.success("✅ Cálculo realizado. A continuación se muestra la hoja resumen.")
+    st.write("### 📄 Hoja: Resumen de Cálculo")
 
-    st.download_button("📥 Descargar Excel completo con fórmulas",
-                       data=archivo_actualizado,
-                       file_name="Resumen_ERSEP_Tarifa.xlsx")
+    for fila in datos:
+        etiqueta = fila[1] if fila[1] else ""
+        valor = fila[2] if fila[2] is not None else ""
+        if etiqueta:
+            st.markdown(f"**{etiqueta}**: {valor}")
+
+    # Generar Excel con solo la hoja de resumen
+    resumen_salida = BytesIO()
+    df_resumen = pd.DataFrame([{"Código": f[0], "Concepto": f[1], "Valor": f[2]} for f in datos if f[1]])
+    with pd.ExcelWriter(resumen_salida, engine="xlsxwriter") as writer:
+        df_resumen.to_excel(writer, sheet_name="Resumen de Cálculo", index=False)
+    resumen_salida.seek(0)
+
+    st.download_button("📥 Descargar Hoja Resumen en Excel", data=resumen_salida, file_name="Resumen_Calculo_ERSEP.xlsx")
